@@ -1,94 +1,114 @@
-import random
+import sqlite3
 import time
-import os
-# import emoji
+from datetime import datetime
+from pathlib import Path
 
-from wit import Wit
-from selenium.webdriver import ActionChains
-from selenium.webdriver.common.keys import Keys
+from selenium.common.exceptions import NoSuchElementException, TimeoutException, WebDriverException
+from selenium.webdriver.common.by import By
+
 from Bots.AllPageBot import AllPageBot
 
 
-all_page = AllPageBot()
-
-try:
-    login = all_page.test_login()
-    print(input("Press any Key: "))
-except:
-    print("You already lodged in")
-
-"""We have to go to message page and stay there for some time
- so elements are fully loaded"""
-
-all_page.driver.get("https://www.facebook.com/messages/")
-all_page.driver.implicitly_wait(4)
+PROJECT_DIRECTORY = Path(__file__).resolve().parents[1]
+DATABASE_PATH = PROJECT_DIRECTORY / "miracle.db"
 
 
-access_token = os.environ.get('wit_access_token')
-client = Wit(access_token)
+def init_message_log_table(connection):
+    cursor = connection.cursor()
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS fb_message_log (
+            _pk_fb_message_log INTEGER PRIMARY KEY AUTOINCREMENT,
+            conversation_name TEXT,
+            message_text TEXT NOT NULL,
+            captured_at TEXT NOT NULL
+        )
+        """
+    )
+    connection.commit()
 
 
-def wit_response(last_message):
-    resp = client.message(last_message)
-    traits = resp['traits']
+def save_message(connection, conversation_name, message_text):
+    cursor = connection.cursor()
+    cursor.execute(
+        """
+        INSERT INTO fb_message_log (conversation_name, message_text, captured_at)
+        VALUES (?, ?, ?)
+        """,
+        (conversation_name, message_text, datetime.utcnow().isoformat(timespec="seconds")),
+    )
+    connection.commit()
+
+
+def is_invalid_session_error(error):
+    return "invalid session id" in str(error).lower()
+
+
+def main():
+    all_page = AllPageBot()
+    connection = None
 
     try:
-        entity = []
-        for key, value in traits.items():
-            entity.append(key)
-            break
-        # print(entity[0][4:])
-        return entity[0][4:]
-    except:
-        pass
+        try:
+            all_page.test_login()
+            input("Press any key: ")
+        except (NoSuchElementException, TimeoutException):
+            print("Already logged in")
+        except WebDriverException as error:
+            if is_invalid_session_error(error):
+                print("Chrome session ended before the message scan started.")
+                return
+            raise
+
+        all_page.driver.get("https://www.facebook.com/messages/")
+        all_page.driver.implicitly_wait(4)
+
+        connection = sqlite3.connect(str(DATABASE_PATH))
+        init_message_log_table(connection)
+
+        input("Press any key: ")
+        unread_message = all_page.driver.find_elements(
+            By.XPATH, "//div[@data-visualcompletion='ignore-dynamic']/child::a"
+        )
+        print(f"Found {len(unread_message)} conversations")
+        print("=" * 80)
+        print("AUTO-REPLY: DISABLED")
+        print("All messages will be saved to DB and printed to console")
+        print("=" * 80)
+
+        for message in unread_message:
+            input("Press any key: ")
+            conversation_name = (message.text or "").strip()
+            message.click()
+            all_page.driver.implicitly_wait(4)
+            time.sleep(4)
+
+            last_message_text = all_page.driver.find_elements(
+                By.XPATH, "//div[@data-testid='message-container']"
+            )
+            if not last_message_text:
+                continue
+
+            latest_message = (last_message_text[-1].text or "").strip()
+            if not latest_message:
+                continue
+
+            save_message(connection, conversation_name or None, latest_message)
+            timestamp = datetime.utcnow().isoformat(timespec="seconds")
+            print(f"\n{'*' * 80}")
+            print(f"[{timestamp}] CONVERSATION: {conversation_name}")
+            print(f"[MESSAGE]: {latest_message}")
+            print(f"[STATUS]: ✓ SAVED TO DB")
+            print(f"{'*' * 80}\n")
+    except WebDriverException as error:
+        if is_invalid_session_error(error):
+            print("Chrome session ended unexpectedly. Restart the browser and try again.")
+            return
+        raise
+    finally:
+        if connection is not None:
+            connection.close()
 
 
-def write_and_send(ai_reply):
-    try:
-        all_page.driver.find_element_by_xpath("//div[@aria-label='Message']").send_keys(ai_reply)
-        all_page.driver.find_element_by_xpath('//div[@aria-label="Press Enter to send"]').click()
-    except:
-        pass
-
-
-"""We are going to find unread message one by one"""
-print(input("Press any Key: "))
-# unread_message = all_page.driver.find_elements_by_xpath("//div[@aria-label='Mark as read']/ancestor::div[@data-visualcompletion='ignore-dynamic']")
-unread_message = all_page.driver.find_elements_by_xpath("//div[@data-visualcompletion='ignore-dynamic']/child::a")
-print(unread_message)
-
-# print(input("Press any Key: "))
-for message in unread_message:
-    print(input("Press any Key: "))
-    message.click()
-    # print(message.text)
-    all_page.driver.implicitly_wait(4)
-    time.sleep(4)
-    """Every unread message have their last message we have to find it"""
-    last_message_text = all_page.driver.find_elements_by_xpath("//div[@data-testid='message-container']")
-    latest_message = last_message_text[-1].text
-    # facebook have emoji so we need to emoji.demojize the massage to convert emoji to text
-    # latest_message = emoji.demojize(latest_message)
-    latest_message = latest_message
-    print(latest_message)
-# """we read the message and take ai help to make the reply"""
-    try:
-        wit_response(latest_message)
-        traits = wit_response(latest_message)
-
-        if traits is None:
-            response = input("Make your own Reply: ")
-            write_and_send(response)
-        elif traits == 'greetings':
-            print('hello')
-            # TODO: This Should Be a Random Response We can build a partial Ai following this Title : Intelligent AI Chat bot in Python link: Video https://www.youtube.com/watch?v=1lwddP0KUEg
-            greeting_list = ['hello', 'hi', 'hy', 'ha']
-            response = random.choice(greeting_list)
-            write_and_send(response)
-    except:
-        pass
-
-"""When all the unread reply are done we make the reply base on profile life circle"""
-
-# first_message = all_page.driver.find_element_by_xpath("//span[@dir='auto']/ancestor::div[@data-visualcompletion='ignore-dynamic']/child::a[@aria-current='page']")
-# first_message.click()
+if __name__ == "__main__":
+    main()
