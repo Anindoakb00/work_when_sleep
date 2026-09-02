@@ -18,8 +18,9 @@ class Login:
             driver.find_element(By.NAME, "login").click()
 
             print(input("Login work Successfully Press any Key: "))
-        except:
-            pass
+        except Exception as error:
+            print(f"Login failed: {error}")
+            raise
 
 
 

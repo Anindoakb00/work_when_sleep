@@ -121,6 +121,7 @@ RELATIVE_TIME_PATTERN = re.compile(
 )
 
 
+
 def create_chrome_options():
     USER_DATA_DIRECTORY.mkdir(exist_ok=True)
 
@@ -730,66 +731,131 @@ def scan_group(browser, group_url, group_index, group_count, seen_posts):
     return True
 
 
-def run_continuous_scanner(browser, start_time):
-    seen_posts = set()
-    group_index = 1
-
-    print("[START] Scanner started")
-
-    while True:
-        group_urls = load_group_urls()
-        current_group = get_current_group(group_urls)
-
-        if not current_group:
-            print("[END] No groups to scan.")
-            break
-
-        group_count = len(group_urls)
-        if group_index > group_count:
-            group_index = 1
-
-        success = False
-        rotated = False
-
+def scan_all_groups_for_pattern(browser, group_urls, pattern_name, pattern_regex, seen_posts, start_time):
+    """Scan all groups looking for ONE specific keyword pattern."""
+    print(f"\n[KEYWORD SCAN] Looking for pattern: {pattern_name}")
+    print(f"[KEYWORD SCAN] Will check {len(group_urls)} groups")
+    print("=" * 80)
+    
+    matches_found = 0
+    
+    for group_index, group_url in enumerate(group_urls, 1):
+        print(f"\n[GROUP {group_index}/{len(group_urls)}] Scanning for '{pattern_name}'")
+        print(f"[GROUP {group_index}/{len(group_urls)}] {group_url}")
+        
         try:
-            success = scan_group(
-                browser=browser,
-                group_url=current_group,
-                group_index=group_index,
-                group_count=group_count,
-                seen_posts=seen_posts,
+            browser.get(group_url)
+            wait_for_page_ready(browser)
+            wait_for_posts(browser)
+            
+            group_name = get_group_name(browser, group_url)
+            print(f"[GROUP {group_index}/{len(group_urls)}] Page loaded: {group_name}")
+            
+            page_start(browser)
+            matches_in_group = scan_loaded_posts_for_keyword(
+                browser, group_name, group_url, seen_posts, pattern_regex, pattern_name
             )
+            matches_found += matches_in_group
+            
+            for scroll_number in range(1, SCROLLS_PER_GROUP + 1):
+                print(f"[SCROLL] {scroll_number}/{SCROLLS_PER_GROUP} for pattern '{pattern_name}'")
+                scroll_down(browser)
+                matches_in_scroll = scan_loaded_posts_for_keyword(
+                    browser, group_name, group_url, seen_posts, pattern_regex, pattern_name
+                )
+                matches_found += matches_in_scroll
+                time.sleep(SCROLL_PAUSE_SECONDS)
+                
         except TimeoutException as error:
             print(f"[ERROR] Could not load group posts: {short_error(error)}")
         except WebDriverException as error:
             print(f"[ERROR] Could not load group: {short_error(error)}")
+    
+    print(f"\n[KEYWORD COMPLETE] Pattern '{pattern_name}' - Found {matches_found} matches")
+    print("=" * 80)
+    print_running_time(start_time)
+    return matches_found
 
-        if success:
-            rotated = rotate_current_group(current_group)
-            if rotated:
-                next_group = get_current_group()
-                if next_group:
-                    print("[QUEUE] Next group:")
-                    print(f"    {next_group}")
-            else:
-                print("[QUEUE] Current group was not rotated; it remains first.")
-        else:
-            print("[GROUP] Scan failed; moving current group to bottom.")
-            rotated = rotate_current_group(current_group)
-            if rotated:
-                next_group = get_current_group()
-                if next_group:
-                    print("[QUEUE] Next group:")
-                    print(f"    {next_group}")
-            else:
-                print("[QUEUE] Current group was not rotated; it remains first.")
-            print(f"[WAIT] Continuing after {GROUP_RETRY_PAUSE_SECONDS} seconds.")
-            time.sleep(GROUP_RETRY_PAUSE_SECONDS)
 
+def scan_loaded_posts_for_keyword(browser, group_name, group_url, seen_posts, pattern_regex, pattern_name):
+    """Scan loaded posts for a specific keyword pattern."""
+    posts = find_post_containers(browser)
+    matches_found = 0
+    
+    for post in posts:
+        try:
+            post_text = extract_post_text(post)
+            if not post_text:
+                continue
+            
+            # Only check if this specific pattern matches
+            if not pattern_regex.search(post_text):
+                continue
+            
+            post_url = extract_post_url(post)
+            timestamp_raw = extract_post_timestamp(post)
+            post_key = build_post_key(group_url, post_url, post_text, timestamp_raw)
+            
+            if post_key in seen_posts:
+                continue
+            seen_posts.add(post_key)
+            
+            match_info = build_match_info(
+                group_name=group_name,
+                group_url=group_url,
+                post_text=post_text,
+                post_url=post_url,
+                matched_patterns=[pattern_name],
+                timestamp_raw=timestamp_raw,
+            )
+            
+            save_match(match_info)
+            alert_user(match_info["freshness_level"])
+            display_match(match_info)
+            matches_found += 1
+            
+        except StaleElementReferenceException:
+            print("[ERROR] Post became stale; skipping it.")
+        except WebDriverException as error:
+            print(f"[ERROR] Could not process post: {short_error(error)}")
+    
+    return matches_found
+
+
+def run_continuous_scanner(browser, start_time):
+    """Scan all keywords across all groups, one keyword at a time."""
+    seen_posts = set()
+    group_urls = load_group_urls()
+    
+    if not group_urls:
+        print("[END] No groups to scan.")
+        return
+    
+    print("[START] Scanner started with KEYWORD-FIRST approach")
+    print(f"[START] {len(group_urls)} groups loaded")
+    print(f"[START] {len(COMPILED_RELEVANCE_PATTERNS)} patterns to search")
+    print("=" * 80)
+    
+    while True:
+        total_matches = 0
+        
+        # Process ONE keyword at a time, check ALL groups for it
+        for pattern, compiled_regex in COMPILED_RELEVANCE_PATTERNS:
+            matches = scan_all_groups_for_pattern(
+                browser,
+                group_urls,
+                pattern,
+                compiled_regex,
+                seen_posts,
+                start_time
+            )
+            total_matches += matches
+        
+        print("\n" + "=" * 80)
+        print(f"[CYCLE COMPLETE] Total matches found in this cycle: {total_matches}")
         print_running_time(start_time)
-        print("[SCAN] Continuing...")
-        if rotated:
-            group_index = (group_index % group_count) + 1
+        print("[SCAN] Starting next cycle...")
+        print("=" * 80)
 
 
 def get_group_name(browser, group_url):
@@ -869,3 +935,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
